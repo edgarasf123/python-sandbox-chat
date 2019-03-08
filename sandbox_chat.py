@@ -56,8 +56,8 @@ class App(QDialog):
         self.windowLayout.addWidget(self.content)
         
         self.addMenu(MenuChat())
-        self.addMenu(MenuTraffic())
-        self.addMenu(MenuFirewall())
+        #self.addMenu(MenuTraffic())
+        #self.addMenu(MenuFirewall())
         self.addMenu(MenuExit())
         
         self.content.setCurrentIndex(0)

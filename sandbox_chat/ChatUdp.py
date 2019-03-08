@@ -1,108 +1,169 @@
 from asyncio import Queue
 from threading import Thread
-from socket import socket
-
+from socket import *
+import threading
 from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSlot, pyqtSignal, QObject
+from sandbox_chat import ChatPeer
+
+from base64 import b64encode
+#from Crypto.Cipher import AES
+#from Crypto.Util.Padding import pad
 
 import sys
 import asyncio
+import logging
+import uuid
 
+uuid_broadcast = uuid.UUID("{89a59843-5611-4d5a-a0ce-edcc8ac15f9e}")
 
-class UdpHost(asyncio.Protocol):
-    def __init__(self, host=None, master=None):
-        
-        if host:
-            self.host = host
-            self.master.peers[self.host] = self
-        
+class UdpProtocol(asyncio.Protocol):
+    def __init__(self, master):
         self.master = master
-        self.msgQueue = Queue()
-        self.firstPacket = True
-        
-        self._ready = asyncio.Event()
-        loop = asyncio.get_event_loop()
-        asyncio.create_task(self._check_queue())
-        
-    def data_received(self, data):
-        msg = data.decode().strip()
-        if self.firstPacket:
-            new_host = msg
-            self.firstPacket = False
-        elif msg:
-            self.master.sig_message.emit(self.host, msg)
+        self.local_uuid = self.master.local_peer.uuid
+        self.peers = self.master.peers
+        self.loop = asyncio.get_event_loop()
         
     def connection_made(self, transport):
-        self.host = transport.get_extra_info('peername')
-        self.host = '{}:{}'.format(*self.host)
         self.transport = transport
-        
-        self.master.peers[self.host] = self
-        self.transport.write(self.master.host.encode() + b'\n')
-        
-        print("{} connected".format(self.host))
-        self._ready.set()
-        
 
-    def connection_lost(self, exc):
-        print("{} disconnected".format(self.host))
-        del self.master.peers[self.host]
-
+    def datagram_received(self, data, addr):
         
-    async def _check_queue(self):
-        await self._ready.wait()
-        while True:
-            msg = await self.msgQueue.get()
-            self.transport.write(msg.encode()+b'\n')
+        if len(data)<32:
+            logging.info("Datagram packet too short! {}".format(len(data)))
+            return
+        try:
+            uuid_from = uuid.UUID(bytes=data[0:16])
+            uuid_to = uuid.UUID(bytes=data[16:32])
             
+        except ValueError:
+            pass
+        
+        # Check if we are the recipient
+        if not uuid_to in (self.local_uuid, uuid_broadcast):
+            return
+        
+        # Ignore our own packets
+        if uuid_from == self.local_uuid:
+            return
+        
+        if not uuid_from in self.peers:
+            new_peer = ChatPeer(uuid=uuid_from, host=addr[0], udp_port=addr[1])
+            self.peers[uuid_from] = new_peer
+            self.master.sig_peer_new.emit(new_peer)
+       
+        peer_from = self.peers[uuid_from]
+        
+        # Additional pointless checks for packet source
+        if not uuid_from in self.peers or self.peers[uuid_from].udp_addr != addr:
+            logging.info("Ugh?")
+            return
+            
+        logging.info("{} {}".format(str(addr), data))
+        self.master.sig_peer_data.emit(peer_from, data[32:])
+        
+    
             
 class ChatUdp(QObject):
-    sig_message = pyqtSignal(str, str)
-    sig_connect = pyqtSignal(str)
+    sig_connected = pyqtSignal(str, str)
+    sig_received = pyqtSignal(ChatPeer, str)
     sig_diconnect = pyqtSignal(str)
+    sig_peer_new = pyqtSignal(ChatPeer)
+    sig_peer_name = pyqtSignal(ChatPeer, str)
+    sig_peer_data = pyqtSignal(ChatPeer, bytes)
     
-    def __init__(self, host, port):
+    def __init__(self, addr, peers, local_peer):
         super().__init__()
-        self.host = host
-        self.port = port
-        self.peers = {}
         
+        self.addr = addr
+        self.ip = addr[0]
+        self.port = addr[1]
+        self.peers = peers
+        self.local_peer = local_peer
+        self.outbox = {}
+        self.transport = None
+        self.protocol = None
+        self.aes_key = ""
     
-    async def main(self):
-        loop = asyncio.get_event_loop()
-        self.loop = loop
-        # Each client will create a new protocol instance
-        srv = await loop.create_server(lambda: TcpHost(master=self), '0.0.0.0', self.port)
+    async def _main(self):
+        logging.info("ChatUdp._main()")
         
-        async with srv:
-            print('Serving on {}'.format(srv.sockets[0].getsockname()))
-            await srv.serve_forever()
+        listen = self.loop.create_datagram_endpoint(
+            lambda: UdpProtocol(self),
+            local_addr=(self.ip, self.port),
+            reuse_address=True,
+            #reuse_port=True,
+            allow_broadcast=True
+            )
         
-        print('Done serving')
+        self.transport, self.protocol = await listen
+        
+        await self._announce_loop()
         
     @pyqtSlot()
-    def start(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        asyncio.run(self.main(), debug=True)
+    def started(self):
+        logging.info("ChatUdp.started()")
+        try: 
+            self.loop = asyncio.new_event_loop()
+            self.loop.set_debug(True)
+            asyncio.set_event_loop(self.loop)
+            
         
-    @pyqtSlot(str, str)
-    def message(self, host, msg):
-        asyncio.run_coroutine_threadsafe(self.__assync__message(host,msg), loop=self.loop)
-                
-    @pyqtSlot(str)
-    def broadcast(self, msg):
-        asyncio.run_coroutine_threadsafe(self.__assync__broadcast(msg), loop=self.loop)
+            self.new_client_lock = asyncio.Lock()
+            
+            logging.info(str(asyncio.get_event_loop()))
+            self.loop.create_task(self._main())
+            self.loop.run_forever()
+        except: 
+            (type, value, traceback) = sys.exc_info()
+            sys.excepthook(type, value, traceback)
+            
         
-    async def __assync__message(self, host, msg):
-        await self.peers[host].msgQueue.put(msg)
-        
+    @pyqtSlot(dict, str, str)
+    def message(self, msg, peer=None, aes=None):
+        logging.info("ChatUdp.message()")
+        self.loop.create_task(self._message(msg, peer))
     
-    async def __assync__broadcast(self, msg):
-        for x in self.peers.values():
-            await x.msgQueue.put(msg)
+    @pyqtSlot()
+    def announce(self):
+        logging.info("ChatUdp.announce()")
+        self.loop.create_task(self._announce())
         
-    async def connect(self, host):
-        transport, protocol = await loop.create_connection(
-        lambda: TcpHost(message, on_con_lost, loop),
-        '127.0.0.1', 8888)
+    @pyqtSlot(str)
+    def update_aes(self, aes_key):
+        logging.info("ChatUdp.update_aes()")
+        self.aes_key = aes_key
+    
+    async def _announce_loop(self):
+        while True:
+            await self._announce()
+            await asyncio.sleep(10)
+    
+    async def _announce(self):
+        logging.info("ChatUdp._announce()")
+        await self._send("ANNOUNCE {}".format("" if self.local_peer.name == "me" else self.local_peer.name ))
+            
+    async def _message(self, msg, peer=None):
+        logging.info("ChatUdp._message()")
+        await self._send("MSG {}".format(msg), peer)
+    
+    async def _message_encrypted(self, msg, peer=None):
+        #cipher = AES.new(self.aes_key, AES.MODE_CBC)
+        #ct_bytes = cipher.encrypt(pad(msg, AES.block_size))
+        #iv = b64encode(cipher.iv).decode('utf-8')
+        #ct = b64encode(ct_bytes).decode('utf-8')
+        
+        #await self._send("MSGE {} {}".format(iv,ct))
+        pass
+        
+    async def _send(self, data, peer=None):
+        logging.info("ChatUdp._send()")
+        data_src = self.local_peer.uuid.bytes
+        data_dst = peer.uuid.bytes if peer else uuid_broadcast.bytes
+        data = data.encode() if isinstance(data,str) else data
+        
+        data_payload = data_src+data_dst+data
+        
+        
+        self.transport.sendto(data_payload, peer.udp_addr if peer else ('255.255.255.255', self.port))
+        

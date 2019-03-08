@@ -1,4 +1,4 @@
-from sandbox_demo import Menu
+from sandbox_chat import Menu
 from PyQt5.QtWidgets import QTextBrowser
 
 class MenuFirewall(Menu):

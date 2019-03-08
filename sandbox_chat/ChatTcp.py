@@ -11,136 +11,26 @@ import logging
 
     
 class TcpPeerConnection(asyncio.Protocol):
-    def __init__(self, peer):
-        self.peer = None
+    def __init__(self, master, peer):
         self.master = None
+        self.peer = None
         
-        if isinstance(peer, ChatTcp):
-            self.master = peer
-        else:
-            self.master = peer.master
-        
-        self.host = ()
         self.first_packet = True
         
     def __del__(self):
         pass
         
     def data_received(self, data):
-        msg = data.decode().strip()
-        if self.first_packet:
-            if not self.peer:
-                peer_data = {
-                    'alias': '{}:{}'.format(*self.host),
-                    'ip': self.host[0]
-                }
-                peer = TcpPeer(peer_data, self.master)
-                self.peer = peer
-            
-            if msg:
-                self.peer.name = msg
-            else:
-                self.peer.name = '{}:{}'.format(*self.host)
-                
-            self.first_packet = False
-                
-            
-        elif msg:
-            self.peer._inbox(msg)
-            
+        self.master.sig_peer_data.emit(self.peer, data)
+        
     def connection_made(self, transport):
-        transport.write(self.master.name.encode() + b'\n')
         self.host = transport.get_extra_info('peername')
         
     def connection_lost(self, exc):
         pass
             
-
-class TcpPeer():
-    def __init__(self, data, master, loop=None):
-        self.master = master
-        self.data = data
-        self.loop = loop if loop else asyncio.get_event_loop()
-        self.name = data['alias'] if 'alias' in data else None
-        self.lock = asyncio.Lock()
-        self.outbox = Queue()
-        self.transport = None
-        self.protocol = None
-        
-        self.name = data['alias'] if 'alias' in data else None
-        
-        self.loop.create_task(self._outbox_worker())
-        
-        master.peers.add(self)
-
-        logging.info('Peer {}: created'.format(self.name))
-        
-    async def update(self):
-        logging.info('Peer {}: updating'.format(self.name))
-        # Update aliases
-        pass
-        
-    async def _get_connection(self):
-        while not self.transport or self.transport.is_closing():
-            logging.info('Peer {}: initiating a link'.format(self.name))
-            try:
-                self.transport, self.protocol = await self.loop.create_connection(lambda: TcpPeerConnection(self), host=self.data['ip'], port=self.master.port)
-                break
-            except TimeoutError:
-                pass
-            except ConnectionRefusedError:
-                pass
-        return self.transport
-    def _inbox(self, msg):
-        logging.info('Peer {}: message - {}'.format(self.name, msg))
-        self.master.sig_receive.emit(self.name, msg)
-            
-    async def _outbox_worker(self):
-        while True:
-            msg = await self.outbox.get()
-            
-            await self._get_connection()
-            
-            self.transport.write(msg.encode()+b'\n')
-            
-            
-    def aliases(self, existing=False, missing=False, invalid=False):
-        if existing:
-            for alias in self.aliases(peer_data):
-                if existing and alias in self.master.peers:
-                    yield alias
-                elif missing and not alias in self.master.peers:
-                    yield alias
-            return
-        
-        if invalid:
-            valid_aliases = list(self.aliases(peer_data))
-            for alias, peer in self.peers.items():
-                if peer is self and not alias in valid_aliases:
-                    yield alias
-                    
-        if self.name:
-            yield self.name
-        
-        if 'alias' in self.data:
-            yield self.data['alias']
-        
-        if 'ip' in self.data and 'port' in self.data:
-            yield '{}:{}'.format(self.data['ip'],self.data['port'])
-        
-    def check_hint(self, hint):
-        if 'alias' in self.data and isinstance(hint, dict) and 'alias' in hint:
-            return hint['alias'] == self.data['alias']
-        elif isinstance(hint, tuple):
-            return self.transport.get_extra_info('peername') == hint
-        #    yield '{}:{}'.format(peer_data[0],peer_data[1])
-        return False
-    
-        
-    
-            
 class ChatTcp(QObject):
-    sig_receive = pyqtSignal(str, str)
+    sig_received = pyqtSignal(str, str)
     sig_connect = pyqtSignal(str)
     sig_diconnect = pyqtSignal(str)
     
@@ -243,4 +133,154 @@ class ChatTcp(QObject):
     async def __assync__broadcast(self, msg):
         for x in self.outbox.values():
             await x.put(msg)
+
+##########################################################################################
+##########################################################################################
+##########################################################################################
+##########################################################################################
+##########################################################################################
+##########################################################################################
+from asyncio import Queue
+from threading import Thread
+from socket import *
+import threading
+from PyQt5 import QtCore
+from PyQt5.QtCore import pyqtSlot, pyqtSignal, QObject
+from sandbox_chat import ChatPeer
+
+from base64 import b64encode
+#from Crypto.Cipher import AES
+#from Crypto.Util.Padding import pad
+
+import sys
+import asyncio
+import logging
+import uuid
+
+uuid_broadcast = uuid.UUID("{89a59843-5611-4d5a-a0ce-edcc8ac15f9e}")
+
+class TcpProtocol(asyncio.Protocol):
+    def __init__(self, master):
+        self.master = master
+        self.loop = asyncio.get_event_loop()
+        self.peer = None
+        
+    def connection_lost(self, exc):
+        pass
+        
+    def connection_made(self, transport):
+        self.transport = transport
+        transport.write(self.master.local_peer.uuid.bytes)
+        
+    def data_received(self, data):
+        if not self.peer:
+            peer_uuid = uuid.UUID(bytes=data)
+            if peer_uuid in self.master.connections:
+                transport.close()
+                return
+                
+            self.peer = self.master.peers[peer_uuid]
+            self.connections[peer_uuid] = self.transport
+        else:
+            self.master.sig_peer_data.emit(self.peer, data)
+            
+    
+            
+class ChatTcp(QObject):
+    sig_connected = pyqtSignal(str, str)
+    sig_received = pyqtSignal(ChatPeer, str)
+    sig_diconnect = pyqtSignal(str)
+    sig_peer_new = pyqtSignal(ChatPeer)
+    sig_peer_name = pyqtSignal(ChatPeer, str)
+    sig_peer_data = pyqtSignal(ChatPeer, bytes)
+    
+    def __init__(self, addr, peers, local_peer):
+        super().__init__()
+        
+        self.addr = addr
+        self.ip = addr[0]
+        self.port = addr[1]
+        self.peers = peers
+        self.local_peer = local_peer
+        self.connections = {}
+        self.outbox = {}
+        self.transport = None
+        self.protocol = None
+        self.aes_key = ""
+    
+    async def _main(self):
+        logging.info("ChatTcp.main()")
+        
+        #Each client will create a new protocol instance
+        srv = await self.loop.create_server(lambda: TcpProtocol(self), self.ip, self.port)
+        
+        async with srv:
+            await srv.serve_forever()
+        
+    @pyqtSlot()
+    def started(self):
+        logging.info("ChatTcp.started()")
+        try: 
+            self.loop = asyncio.new_event_loop()
+            self.loop.set_debug(True)
+            asyncio.set_event_loop(self.loop)
+            
+        
+            self.new_client_lock = asyncio.Lock()
+            
+            logging.info(str(asyncio.get_event_loop()))
+            self.loop.create_task(self._main())
+            self.loop.run_forever()
+        except: 
+            (type, value, traceback) = sys.exc_info()
+            sys.excepthook(type, value, traceback)
+            
+        
+    @pyqtSlot(dict, str, str)
+    def message(self, msg, peer=None, aes=None):
+        logging.info("ChatTcp.message()")
+        self.loop.create_task(self._message(msg, peer))
+    
+    @pyqtSlot()
+    def announce(self):
+        logging.info("ChatTcp.announce()")
+        self.loop.create_task(self._announce())
+        
+    @pyqtSlot(str)
+    def update_aes(self, aes_key):
+        logging.info("ChatTcp.update_aes()")
+        self.aes_key = aes_key
+    
+    async def _announce_loop(self):
+        while True:
+            await self._announce()
+            await asyncio.sleep(10)
+    
+    async def _announce(self):
+        logging.info("ChatTcp._announce()")
+        await self._send("ANNOUNCE {}".format("" if self.local_peer.name == "me" else self.local_peer.name ))
+            
+    async def _message(self, msg, peer=None):
+        logging.info("ChatTcp._message()")
+        await self._send("MSG {}".format(msg), peer)
+    
+    async def _message_encrypted(self, msg, peer=None):
+        #cipher = AES.new(self.aes_key, AES.MODE_CBC)
+        #ct_bytes = cipher.encrypt(pad(msg, AES.block_size))
+        #iv = b64encode(cipher.iv).decode('utf-8')
+        #ct = b64encode(ct_bytes).decode('utf-8')
+        
+        #await self._send("MSGE {} {}".format(iv,ct))
+        pass
+        
+    async def _send(self, data, peer=None):
+        logging.info("ChatTcp._send()")
+        data_src = self.local_peer.uuid.bytes
+        data_dst = peer.uuid.bytes if peer else uuid_broadcast.bytes
+        data = data.encode() if isinstance(data,str) else data
+        
+        data_payload = data_src+data_dst+data
+        
+        
+        self.transport.sendto(data_payload, peer.udp_addr if peer else ('255.255.255.255', self.port))
         

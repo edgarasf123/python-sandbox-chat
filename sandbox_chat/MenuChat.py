@@ -133,7 +133,7 @@ class MenuChat(Menu):
         self.local_peer.name = socket.gethostname()
     
     def setupTcp(self):
-        self.chatTcp = ChatUdp(('0.0.0.0', 5002), peers=self.peers, local_peer=self.local_peer)
+        self.chatTcp = ChatTcp(('0.0.0.0', 5012), peers=self.peers, local_peer=self.local_peer)
         self.chatTcp.sig_peer_data.connect(lambda peer, data: self.peer_data(peer, data))  
         
         self.chatTcp_thread = QThread()
@@ -147,12 +147,12 @@ class MenuChat(Menu):
         self.chatTcp_thread.start()
 
         
-    def tcpSend(self, host_data, msg):
-        logging.info("tcpSend "+host_data['host'])
-        self.chatTcp.loop.call_soon_threadsafe(self.chatTcp.send, host_data,msg)    
+    def tcpSend(self, peer, msg):
+        logging.info("tcpSend ")
+        self.chatTcp.loop.call_soon_threadsafe(self.chatTcp.message,msg, peer)    
         
     def setupUdp(self):
-        self.chatUdp = ChatUdp(('0.0.0.0', 5001), peers=self.peers, local_peer=self.local_peer)
+        self.chatUdp = ChatUdp(('0.0.0.0', 5011), peers=self.peers, local_peer=self.local_peer)
         #self.chatUdp.sig_received.connect(lambda peer, msg: self.encryptedMessage(peer, msg))
         self.chatUdp.sig_peer_new.connect(lambda peer: self.peer_new(peer))
         self.chatUdp.sig_peer_name.connect(lambda peer, name: self.peer_name(peer, name))
@@ -197,7 +197,7 @@ class MenuChat(Menu):
         self.addMessage(self.local_peer, msg)
         
         if self.qtNetworkTcp.isChecked():
-            for uuid, peers in self.peers.items():
+            for uuid, peer in self.peers.items():
                 if uuid in self.peers_checkboxes and self.peers_checkboxes[uuid].checkState() == 2:
                     self.tcpSend(peer, msg)
         elif self.qtNetworkUdp.isChecked():
@@ -228,16 +228,19 @@ class MenuChat(Menu):
         }
     
     def peer_new( self, peer ):
-        
         checkbox = QCheckBox(peer.name)
         self.qtPeersLayout.addWidget(checkbox)
         self.peers[peer.uuid] = peer
         self.peers_checkboxes[peer.uuid] = checkbox
         
     def peer_name_changed(self, peer):
-        self.peers_checkboxes[peer.uuid].setText(peer.name)
+        if peer.uuid in self.peers_checkboxes:
+            self.peers_checkboxes[peer.uuid].setText(peer.name)
 
     def peer_data(self, peer, data):
+        if not peer.uuid in self.peers:
+            self.peer_new(peer)
+        
         cmd, *opts = data.decode().split(' ',1)
         cmd = cmd.upper()
         opts = opts[0] if opts else None

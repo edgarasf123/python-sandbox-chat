@@ -27,6 +27,9 @@ class UdpProtocol(asyncio.Protocol):
     def connection_made(self, transport):
         self.transport = transport
 
+    def error_received(self, err):
+        logging.info(err)
+
     def datagram_received(self, data, addr):
         
         if len(data)<32:
@@ -48,16 +51,14 @@ class UdpProtocol(asyncio.Protocol):
             return
         
         if not uuid_from in self.peers:
-            new_peer = ChatPeer(uuid=uuid_from, host=addr[0], udp_port=addr[1])
-            self.peers[uuid_from] = new_peer
-            self.master.sig_peer_new.emit(new_peer)
-       
-        peer_from = self.peers[uuid_from]
+            peer_from = ChatPeer(uuid=uuid_from, host=addr[0], udp_port=addr[1], tcp_port=5012)
+        else:
+            peer_from = self.peers[uuid_from]
         
         # Additional pointless checks for packet source
-        if not uuid_from in self.peers or self.peers[uuid_from].udp_addr != addr:
-            logging.info("Ugh?")
-            return
+        if peer_from.udp_addr != addr:
+            #logging.info("Ugh? {}!={}".format(peer_from.udp_addr, addr))
+            pass #return
             
         logging.info("{} {}".format(str(addr), data))
         self.master.sig_peer_data.emit(peer_from, data[32:])
@@ -92,7 +93,7 @@ class ChatUdp(QObject):
             lambda: UdpProtocol(self),
             local_addr=(self.ip, self.port),
             reuse_address=True,
-            #reuse_port=True,
+            reuse_port=True,
             allow_broadcast=True
             )
         
@@ -164,6 +165,5 @@ class ChatUdp(QObject):
         
         data_payload = data_src+data_dst+data
         
-        
-        self.transport.sendto(data_payload, peer.udp_addr if peer else ('255.255.255.255', self.port))
-        
+        if self.transport:
+	        self.transport.sendto(data_payload, peer.udp_addr if peer else ('10.255.255.255', self.port))
